@@ -18,14 +18,17 @@ import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.Image;
 import android.media.ImageReader;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.provider.ContactsContract;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 import android.support.v4.app.ActivityCompat;
 import android.support.v4.app.Fragment;
+import android.util.Log;
 import android.util.Size;
 import android.util.SparseIntArray;
 import android.view.LayoutInflater;
@@ -33,15 +36,33 @@ import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.Button;
 import android.widget.Toast;
 
+import com.google.android.gms.tasks.Continuation;
+import com.google.android.gms.tasks.OnCompleteListener;
+import com.google.android.gms.tasks.OnFailureListener;
+import com.google.android.gms.tasks.OnSuccessListener;
+import com.google.android.gms.tasks.Task;
+import com.google.firebase.database.DatabaseReference;
+import com.google.firebase.database.FirebaseDatabase;
+import com.google.firebase.storage.FirebaseStorage;
+import com.google.firebase.storage.StorageReference;
+import com.google.firebase.storage.UploadTask;
+
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Calendar;
+import java.util.Date;
 import java.util.List;
 
 public class CameraFragment extends Fragment {
+    public static final String TAG = CameraFragment.class.getSimpleName();
     public static final int REQUEST_PERMISION_CODE = 1;
     private static final SparseIntArray ORIENTATIONS = new SparseIntArray();
 
@@ -97,6 +118,7 @@ public class CameraFragment extends Fragment {
 
         }
     };
+    Button captureButton;
 
     public static CameraFragment newInstance() {
         CameraFragment cameraFragment = new CameraFragment();
@@ -120,6 +142,13 @@ public class CameraFragment extends Fragment {
         View view = inflater.inflate(R.layout.fragment_camera,container,false);
         textureView = view.findViewById(R.id.texture_view_camera_frament);
         textureView.setSurfaceTextureListener(textureListener);
+        captureButton = view.findViewById(R.id.button_capture);
+        captureButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                takePicture();
+            }
+        });
         return view;
     }
 
@@ -227,26 +256,22 @@ public class CameraFragment extends Fragment {
             captRequestBuilder.addTarget(imageReader.getSurface());
             captRequestBuilder.set(CaptureRequest.CONTROL_MODE,CameraMetadata.CONTROL_MODE_AUTO);
 
-            int deviceOrientation = getActivity().getWindowManager().getDefaultDisplay().getOrientation();
-            captRequestBuilder.set(CaptureRequest.JPEG_ORIENTATION,ORIENTATIONS.get(deviceOrientation));
-            //roatation compensation for firebase vision
-           // int sensorOrientaion = cameraCharacteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
-            /*final int rotationCompensation = ROTATION_COMPENSATIONS
-                    .get((ORIENTATIONS.get(deviceOrientation)+sensorOrientaion+270)%360);*/
-            final File file = new File(Environment.getDownloadCacheDirectory(),"/capture.jpg");
-            imageReader.setOnImageAvailableListener(new ImageReader.OnImageAvailableListener() {
-                @Override
-                public void onImageAvailable(ImageReader reader) {
-                    try (Image image = reader.acquireLatestImage()) {
-                       // predictInput(image,rotationCompensation);
-                        ByteBuffer buffer = image.getPlanes()[0].getBuffer();
-                        byte[] bytes = new byte[buffer.capacity()];
-                        buffer.get(bytes);
-                        //write to the file
-                        Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
-                        System.out.println(bitmap);
-                        System.out.println("Written to bitmap");
-                    }
+            /*int deviceOrientation = getActivity().getWindowManager().getDefaultDisplay().getOrientation();
+            captRequestBuilder.set(CaptureRequest.JPEG_ORIENTATION,ORIENTATIONS.get(deviceOrientation));*/
+
+            imageReader.setOnImageAvailableListener(reader -> {
+                try (Image image = reader.acquireLatestImage()) {
+                   // predictInput(image,rotationCompensation);
+
+                    ByteBuffer buffer = image.getPlanes()[0].getBuffer();
+                    byte[] bytes = new byte[buffer.capacity()];
+                    buffer.get(bytes);
+                    //write to the file
+                    Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+                    System.out.println(bitmap);
+                    System.out.println("Written to bitmap");
+                    uploadFile(saveBitmap(bitmap));
+
                 }
             },bgThreadHandler);
 
@@ -259,7 +284,6 @@ public class CameraFragment extends Fragment {
                             public void onCaptureCompleted(CameraCaptureSession session, CaptureRequest request,
                                                            TotalCaptureResult result) {
                                 super.onCaptureCompleted(session, request, result);
-                                Toast.makeText(getActivity(),"saved to "+file,Toast.LENGTH_LONG).show();
                                 CameraFragment.this.createPreview();
                             }
                         },bgThreadHandler);
@@ -293,5 +317,71 @@ public class CameraFragment extends Fragment {
         } catch(InterruptedException iE) {
             iE.printStackTrace();
         }
+    }
+
+    public File saveBitmap(Bitmap bitmap) {
+        // Get the directory for the user's public pictures directory.
+        if(!isExternalStorageWritable()) {
+            Log.e(TAG, "External Storage not writable");
+            return null;
+        }
+        File dir = new File(Environment.getExternalStoragePublicDirectory(
+                Environment.DIRECTORY_PICTURES), "vamimages");
+        Log.i(TAG,"directory pictures exists : "+dir.exists());
+        if (!dir.exists() && !dir.mkdirs()) {
+            Log.e(TAG, "Directory not created");
+            return null;
+        }
+        String fileName  = "vam"+String.valueOf(Calendar.getInstance().getTimeInMillis())+".png";
+        File file = new File(dir,fileName);
+        try(FileOutputStream fos = new FileOutputStream(file)) {
+            bitmap.compress(Bitmap.CompressFormat.PNG,100,fos);
+            Toast.makeText(getContext(),file.getAbsolutePath(),Toast.LENGTH_LONG).show();
+            return file;
+        } catch(IOException ioE) {
+            ioE.printStackTrace();
+            Log.e(TAG,"Unable to write to the file");
+            return null;
+        }
+    }
+
+    public boolean isExternalStorageWritable() {
+        String state = Environment.getExternalStorageState();
+        if (Environment.MEDIA_MOUNTED.equals(state)) {
+            return true;
+        }
+        return false;
+    }
+
+    public void uploadFile(File file) {
+        Log.i(TAG, "Uploading file");
+        final StorageReference storageRef = FirebaseStorage.getInstance().getReference().child("vamimages").child(file.getName());
+        UploadTask uploadTask = storageRef.putFile(Uri.fromFile(file));
+        uploadTask.continueWithTask(new Continuation<UploadTask.TaskSnapshot, Task<Uri>>() {
+            @Override
+            public Task<Uri> then(@NonNull Task<UploadTask.TaskSnapshot> task) throws Exception {
+                if (!task.isSuccessful()) {
+                    Log.e(TAG, "Upload Task failed");
+                    throw task.getException();
+                }
+                Log.i(TAG, "Upload Task Successful. File successfully uploaded to Firebase storage");
+                return storageRef.getDownloadUrl();
+            }
+        }).addOnCompleteListener(new OnCompleteListener<Uri>() {
+            @Override
+            public void onComplete(@NonNull Task<Uri> task) {
+                if(task.isSuccessful()) {
+                    Uri uri = task.getResult();
+                    FirebaseDatabase.getInstance().getReference()
+                            .child("vamimages")
+                            .push()
+                            .setValue(uri.toString());
+                    Log.i(TAG,"Download URL Task successful");
+                } else {
+                    Log.e(TAG,"Download URL Task failed");
+                    Log.e(TAG,task.getException().getMessage());
+                }
+            }
+        });
     }
 }
